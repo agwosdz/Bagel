@@ -26,48 +26,48 @@ parser.add_argument("--server_name", type=str, default="127.0.0.1")
 parser.add_argument("--server_port", type=int, default=7860)
 parser.add_argument("--share", action="store_true")
 parser.add_argument("--model_path", type=str, default="./models/BAGEL-7B-MoT")
-parser.add_argument("--use_dfloat11", type=bool,default=False)
+parser.add_argument("--dfloat11", type=bool,default=False)
+parser.add_argument("--int8", type=bool, default=False)
+parser.add_argument("--fp8", type=bool, default=False)
+parser.add_argument("--get_models",type=bool, help="Download models from Hugging Face (Original, INT8, FP8, and DFloat11", default=False)
 args = parser.parse_args()
 
 # Model Initialization and download
-if args.use_dfloat11:
-    # Set DFloat11 Model Path
-    model_path = "./models/BAGEL-7B-MoT-DF11"
-    # Check if model path exists
-    if not os.path.exists(args.model_path):
-        os.makedirs(args.model_path, exist_ok=True)
-        # check if model exists in the path
-        if not os.path.exists(os.path.join(args.model_path, "llm_config.json")):
-            print(f"Model not found in {args.model_path}. Downloading DFloat11 model...")
-            # Download and load DFloat11 model
-            save_dir = args.model_path
-            repo_id = "DFloat11/BAGEL-7B-MoT-DF11"
-            cache_dir = os.path.join(save_dir, "cache")
-            snapshot_download(
-                cache_dir=cache_dir,
-                local_dir=save_dir,
-                repo_id=repo_id,
-                local_dir_use_symlinks=False,
-                resume_download=True,
-                allow_patterns=["*.json", "*.safetensors", "*.bin", "*.py", "*.md", "*.txt"],
-            )
-
-else:
-    model_path = args.model_path #Download from https://huggingface.co/ByteDance-Seed/BAGEL-7B-MoT to models/BAGEL-7B-MoT
-    # Check if model path exists
+def download_model(repo_id, model_path):
     if not os.path.exists(model_path):
         os.makedirs(model_path, exist_ok=True)
-        # check if model exists in the path
-        if not os.path.exists(os.path.join(model_path, "llm_config.json")):
-            print(f"Model not found in {model_path}. Downloading from Hugging Face...")
-            # Download and load model from Hugging Face
-            snapshot_download(
-                repo_id="ByteDance-Seed/BAGEL-7B-MoT",
-                local_dir=model_path,
-                local_dir_use_symlinks=False,
-                resume_download=True,
-                allow_patterns=["*.json", "*.safetensors", "*.bin", "*.py", "*.md", "*.txt"],
-            )
+    if not os.path.exists(os.path.join(model_path, "llm_config.json")):
+        print(f"Model not found in {model_path}. Downloading from Hugging Face repo {repo_id}...")
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=model_path,
+            local_dir_use_symlinks=False,
+            resume_download=True,
+            allow_patterns=["*.json", "*.safetensors", "*.bin", "*.py", "*.md", "*.txt"],
+        )
+
+if args.get_models:
+    # Download all 4 models
+    download_model("ByteDance-Seed/BAGEL-7B-MoT", "./models/BAGEL-7B-MoT")
+    download_model("Gapeleon/bytedance_BAGEL-7B-MoT-INT8", "./models/BAGEL-7B-MoT-INT8")
+    download_model("meimeilook/BAGEL-7B-MoT-FP8", "./models/BAGEL-7B-MoT-FP8")
+    download_model("DFloat11/BAGEL-7B-MoT-DF11", "./models/BAGEL-7B-MoT-DF11")
+    print("All models downloaded. Exiting as --get_models was specified.")
+    exit(0)
+if args.dfloat11:
+    model_path = "./models/BAGEL-7B-MoT-DF11"
+    repo_id = "DFloat11/BAGEL-7B-MoT-DF11"
+elif args.int8:
+    model_path = "./models/BAGEL-7B-MoT-INT8"
+    repo_id = "Gapeleon/bytedance_BAGEL-7B-MoT-INT8"
+elif args.fp8:
+    model_path = "./models/BAGEL-7B-MoT-FP8"
+    repo_id = "meimeilook/BAGEL-7B-MoT-FP8"
+else:
+    model_path = args.model_path
+    repo_id = "ByteDance-Seed/BAGEL-7B-MoT"
+
+download_model(repo_id, model_path)
 llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
 llm_config.qk_norm = True
 llm_config.tie_word_embeddings = False
@@ -573,7 +573,11 @@ with gr.Blocks() as demo:
 </div>
 """)
 
-if __name__ == "__main__": 
+if __name__ == "__main__":
+    # Print DFloat 11 model information if selected
+    if args.dfloat11:
+        print("Using DFloat 11 model for BAGEL-7B-MoT.")
+        
     demo.launch(
         server_name=args.server_name, 
         server_port=args.server_port,
