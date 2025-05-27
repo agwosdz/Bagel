@@ -19,7 +19,7 @@ from data.data_utils import (
 )
 from .qwen2_navit import NaiveCache
 from .modeling_utils import MLPconnector, TimestepEmbedder, PositionEmbedding
-
+from tqdm import tqdm
 
 class BagelConfig(PretrainedConfig):
     def __init__(
@@ -675,7 +675,7 @@ class Bagel(PreTrainedModel):
         dts =  timesteps[:-1] - timesteps[1:]
         timesteps = timesteps[:-1]
 
-        for i, t in enumerate(timesteps):
+        for i, t in tqdm(enumerate(timesteps), total=len(timesteps)):
 
             timestep = torch.tensor([t] * x_t.shape[0], device=x_t.device)
             if t > cfg_interval[0] and t <= cfg_interval[1]:
