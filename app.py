@@ -4,7 +4,7 @@ import os
 import torch
 import random
 
-from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
+from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights, dispatch_model
 from PIL import Image
 
 from data.data_utils import add_special_tokens, pil_img2rgb
@@ -17,19 +17,57 @@ from modeling.bagel import (
     SiglipVisionConfig, SiglipVisionModel
 )
 from modeling.qwen2 import Qwen2Tokenizer
-
+from huggingface_hub import snapshot_download
+from dfloat11 import DFloat11Model
 import argparse
 
 parser = argparse.ArgumentParser() 
 parser.add_argument("--server_name", type=str, default="127.0.0.1")
 parser.add_argument("--server_port", type=int, default=7860)
 parser.add_argument("--share", action="store_true")
-parser.add_argument("--model_path", type=str, default="models/BAGEL-7B-MoT")
+parser.add_argument("--model_path", type=str, default="./models/BAGEL-7B-MoT")
+parser.add_argument("--use_dfloat11", type=bool,default=False)
 args = parser.parse_args()
 
-# Model Initialization
-model_path = args.model_path #Download from https://huggingface.co/ByteDance-Seed/BAGEL-7B-MoT to models/BAGEL-7B-MoT
+# Model Initialization and download
+if args.use_dfloat11:
+    # Set DFloat11 Model Path
+    model_path = "./models/BAGEL-7B-MoT-DF11"
+    # Check if model path exists
+    if not os.path.exists(args.model_path):
+        os.makedirs(args.model_path, exist_ok=True)
+        # check if model exists in the path
+        if not os.path.exists(os.path.join(args.model_path, "llm_config.json")):
+            print(f"Model not found in {args.model_path}. Downloading DFloat11 model...")
+            # Download and load DFloat11 model
+            save_dir = args.model_path
+            repo_id = "DFloat11/BAGEL-7B-MoT-DF11"
+            cache_dir = os.path.join(save_dir, "cache")
+            snapshot_download(
+                cache_dir=cache_dir,
+                local_dir=save_dir,
+                repo_id=repo_id,
+                local_dir_use_symlinks=False,
+                resume_download=True,
+                allow_patterns=["*.json", "*.safetensors", "*.bin", "*.py", "*.md", "*.txt"],
+            )
 
+else:
+    model_path = args.model_path #Download from https://huggingface.co/ByteDance-Seed/BAGEL-7B-MoT to models/BAGEL-7B-MoT
+    # Check if model path exists
+    if not os.path.exists(model_path):
+        os.makedirs(model_path, exist_ok=True)
+        # check if model exists in the path
+        if not os.path.exists(os.path.join(model_path, "llm_config.json")):
+            print(f"Model not found in {model_path}. Downloading from Hugging Face...")
+            # Download and load model from Hugging Face
+            snapshot_download(
+                repo_id="ByteDance-Seed/BAGEL-7B-MoT",
+                local_dir=model_path,
+                local_dir_use_symlinks=False,
+                resume_download=True,
+                allow_patterns=["*.json", "*.safetensors", "*.bin", "*.py", "*.md", "*.txt"],
+            )
 llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
 llm_config.qk_norm = True
 llm_config.tie_word_embeddings = False
@@ -39,7 +77,10 @@ vit_config = SiglipVisionConfig.from_json_file(os.path.join(model_path, "vit_con
 vit_config.rope = False
 vit_config.num_hidden_layers -= 1
 
-vae_model, vae_config = load_ae(local_path=os.path.join(model_path, "ae.safetensors"))
+if args.dfloat11:
+    vae_model, vae_config = load_ae(local_path=os.path.join(model_path, "vae/ae.safetensors"))
+else: 
+    vae_model, vae_config = load_ae(local_path=os.path.join(model_path, "ae.safetensors"))
 
 config = BagelConfig(
     visual_gen=True,
@@ -64,12 +105,25 @@ tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
 
 vae_transform = ImageTransform(1024, 512, 16)
 vit_transform = ImageTransform(980, 224, 14)
+# Load DFloat 11 model if selected
+if args.use_dfloat11:
+    model = model.to(torch.bfloat16)
+    model.load_state_dict({
+        name: torch.empty(param.shape, dtype=param.dtype, device='cpu') if param.device.type == 'meta' else param
+        for name, param in model.state_dict().items()
+    }, assign=True)
+
+    DFloat11Model.from_pretrained(
+        model_path,
+        bfloat16_model=model,
+        device='cpu',
+    )
 
 # Model Loading and Multi GPU Infernece Preparing
 device_map = infer_auto_device_map(
     model,
-    max_memory={i: "80GiB" for i in range(torch.cuda.device_count())},
-    no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
+    max_memory={0: "24GiB"},
+    no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer", "SiglipVisionModel"],
 )
 
 same_device_modules = [
@@ -95,15 +149,21 @@ else:
         if k in device_map:
             device_map[k] = first_device
             
-model = load_checkpoint_and_dispatch(
-    model,
-    checkpoint=os.path.join(model_path, "ema.safetensors"),
-    device_map=device_map,
-    offload_buffers=True,
-    offload_folder="offload",
-    dtype=torch.bfloat16,
-    force_hooks=True,
-).eval()
+#Handliong of DFloat 11 option 
+if args.use_dfloat11:
+    model = dispatch_model(model, device_map=device_map, force_hooks=True)
+    model = model.eval()
+else:
+    # Load the model with checkpoint and dispatch it to the device map
+    model = load_checkpoint_and_dispatch(
+        model,
+        checkpoint=os.path.join(model_path, "ema.safetensors"),
+        device_map=device_map,
+        offload_buffers=True,
+        offload_folder="offload",
+        dtype=torch.bfloat16,
+        force_hooks=True,
+    ).eval()
 
 
 # Inferencer Preparing 
