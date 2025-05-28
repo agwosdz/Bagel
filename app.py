@@ -20,11 +20,12 @@ from modeling.qwen2 import Qwen2Tokenizer
 from huggingface_hub import snapshot_download
 from dfloat11 import DFloat11Model
 import argparse
+from ml_dtypes import float8_e4m3fn
 
 parser = argparse.ArgumentParser() 
 parser.add_argument("--server_name", type=str, default="127.0.0.1")
 parser.add_argument("--server_port", type=int, default=7860)
-parser.add_argument("--share", action="store_true")
+parser.add_argument("--share", action="store_true", default=True)
 parser.add_argument("--model_path", type=str, default="./models/BAGEL-7B-MoT")
 parser.add_argument("--dfloat11", type=bool,default=False)
 parser.add_argument("--int8", type=bool, default=False)
@@ -67,7 +68,19 @@ else:
     model_path = args.model_path
     repo_id = "ByteDance-Seed/BAGEL-7B-MoT"
 
-download_model(repo_id, model_path)
+# Check if model path exists and contains llm_config.json, otherwise download
+if not os.path.exists(model_path):
+    os.makedirs(model_path, exist_ok=True)
+
+if not os.path.exists(os.path.join(model_path, "llm_config.json")):
+    print(f"Model not found in {model_path}. Downloading from Hugging Face repo {repo_id}...")
+    snapshot_download(
+        repo_id=repo_id,
+        local_dir=model_path,
+        local_dir_use_symlinks=False,
+        resume_download=True,
+        allow_patterns=["*.json", "*.safetensors", "*.bin", "*.py", "*.md", "*.txt"],
+    )
 llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
 llm_config.qk_norm = True
 llm_config.tie_word_embeddings = False
@@ -106,7 +119,7 @@ tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
 vae_transform = ImageTransform(1024, 512, 16)
 vit_transform = ImageTransform(980, 224, 14)
 # Load DFloat 11 model if selected
-if args.use_dfloat11:
+if args.dfloat11:
     model = model.to(torch.bfloat16)
     model.load_state_dict({
         name: torch.empty(param.shape, dtype=param.dtype, device='cpu') if param.device.type == 'meta' else param
@@ -150,9 +163,31 @@ else:
             device_map[k] = first_device
             
 #Handliong of DFloat 11 option 
-if args.use_dfloat11:
+if args.dfloat11:
     model = dispatch_model(model, device_map=device_map, force_hooks=True)
     model = model.eval()
+elif args.fp8:
+    # Load the model with checkpoint and dispatch it to the device map
+    model = load_checkpoint_and_dispatch(
+        model,
+        checkpoint=os.path.join(model_path, "ema-fp8.safetensors"),
+        device_map=device_map,
+        offload_buffers=True,
+        offload_folder="offload",
+        dtype=torch.float8_e4m3fn,
+        force_hooks=True,
+    ).eval()
+elif args.int8:
+    # Load the model with checkpoint and dispatch it to the device map
+    model = load_checkpoint_and_dispatch(
+        model,
+        checkpoint=os.path.join(model_path, "ema-int8.safetensors"),
+        device_map=device_map,
+        offload_buffers=True,
+        offload_folder="offload",
+        dtype=torch.int8,
+        force_hooks=True,
+    ).eval()
 else:
     # Load the model with checkpoint and dispatch it to the device map
     model = load_checkpoint_and_dispatch(
